@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -28,8 +29,8 @@ def telegram_call(token, method, data):
     return payload["result"]
 
 def test_telegram_delivery(token):
-    # Only match the user's already-sent request, before this code was published.
-    # Never bind future strangers who discover the bot through the public repo.
+    # Reply only to one private chat with the explicit setup request.
+    # This test does not persist or authorize a future alert recipient.
     updates = telegram_call(token, "getUpdates", {"timeout": 0, "limit": 100})
     if len(updates) == 100:
         update("telegram_test", "inbox_requires_review")
@@ -40,7 +41,7 @@ def test_telegram_delivery(token):
         chat = msg.get("chat", {})
         if (chat.get("type") == "private"
             and msg.get("text", "").strip().casefold() == "connect my doomsday alerts"
-            and 1794822146 <= msg.get("date", 0) <= 1794908546):
+            and time.time() - 86400 <= msg.get("date", 0) <= time.time() + 60):
             matches[chat["id"]] = item["update_id"]
     if len(matches) != 1:
         update("telegram_test", "no_matching_message" if not matches else "ambiguous_recipient")
@@ -53,6 +54,18 @@ def test_telegram_delivery(token):
     update("telegram_test", "message_accepted_by_telegram")
     # Confirm the matched update after successful sending to prevent replay on restart.
     telegram_call(token, "getUpdates", {"offset": update_id + 1, "timeout": 0, "limit": 1})
+
+def wait_for_setup_message(token):
+    for _ in range(90):
+        try:
+            test_telegram_delivery(token)
+        except Exception:
+            update("telegram_test", "send_or_inbox_check_failed")
+            return
+        if state.get("telegram_test") != "no_matching_message":
+            return
+        time.sleep(10)
+    update("telegram_test", "setup_wait_expired")
 
 def check_connections():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -68,10 +81,7 @@ def check_connections():
             update("telegram", "verified" if payload.get("ok") and username.lower() == expected.lower()
                    else "wrong_bot_or_invalid_token")
             if payload.get("ok") and username.lower() == expected.lower():
-                try:
-                    test_telegram_delivery(token)
-                except Exception:
-                    update("telegram_test", "send_or_inbox_check_failed")
+                threading.Thread(target=wait_for_setup_message, args=(token,), daemon=True).start()
         except Exception:
             # Never log exception strings: they may contain the token-bearing URL.
             update("telegram", "connection_or_authentication_failed")
