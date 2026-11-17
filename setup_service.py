@@ -17,6 +17,43 @@ def update(key, value):
         state[key] = value
     print(key + ": " + value, flush=True)
 
+
+def telegram_call(token, method, data):
+    req = urllib.request.Request("https://api.telegram.org/bot" + token + "/" + method,
+        data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as response:
+        payload = json.load(response)
+    if not payload.get("ok"):
+        raise RuntimeError("Telegram request failed")
+    return payload["result"]
+
+def test_telegram_delivery(token):
+    # Only match the user's already-sent request, before this code was published.
+    # Never bind future strangers who discover the bot through the public repo.
+    updates = telegram_call(token, "getUpdates", {"timeout": 0, "limit": 100})
+    if len(updates) == 100:
+        update("telegram_test", "inbox_requires_review")
+        return
+    matches = {}
+    for item in updates:
+        msg = item.get("message", {})
+        chat = msg.get("chat", {})
+        if (chat.get("type") == "private"
+            and msg.get("text", "").strip().casefold() == "connect my doomsday alerts"
+            and 1794822146 <= msg.get("date", 0) <= 1794908546):
+            matches[chat["id"]] = item["update_id"]
+    if len(matches) != 1:
+        update("telegram_test", "no_matching_message" if not matches else "ambiguous_recipient")
+        return
+    chat_id, update_id = next(iter(matches.items()))
+    telegram_call(token, "sendMessage", {
+        "chat_id": chat_id,
+        "text": "TEST ONLY: Your Doomsday alert bot can send messages to this chat. Ticket monitoring is NOT active. BookMyShow is currently blocking our cloud checks. This is not a ticket-availability alert.",
+        "disable_notification": False})
+    update("telegram_test", "message_accepted_by_telegram")
+    # Confirm the matched update after successful sending to prevent replay on restart.
+    telegram_call(token, "getUpdates", {"offset": update_id + 1, "timeout": 0, "limit": 1})
+
 def check_connections():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if token:
@@ -30,6 +67,11 @@ def check_connections():
             expected = os.environ.get("TELEGRAM_BOT_USERNAME", "NirmalDoomsdayAlertBot")
             update("telegram", "verified" if payload.get("ok") and username.lower() == expected.lower()
                    else "wrong_bot_or_invalid_token")
+            if payload.get("ok") and username.lower() == expected.lower():
+                try:
+                    test_telegram_delivery(token)
+                except Exception:
+                    update("telegram_test", "send_or_inbox_check_failed")
         except Exception:
             # Never log exception strings: they may contain the token-bearing URL.
             update("telegram", "connection_or_authentication_failed")
